@@ -1,6 +1,7 @@
 #! .venv/bin/python3
 import pickle
 import lightgbm
+import logging
 from lightgbm import LGBMRegressor
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
@@ -16,83 +17,72 @@ from telegram.ext import (
 with open("token.txt", "r") as token_file:
     TOKEN = token_file.readline()[:-1]
 
+logging.basicConfig(
+        filename='tgbot.log',
+        encoding='utf-8',
+        format='[%(asctime)s] %(message)s',
+        level=logging.INFO
+)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.info('Начало работы бота')
+
 DATA = {}
 IS_NEW, MINUTES, IS_MOSCOW, DISTRICT, ROOMS, AREA, KIT_AREA, FLOOR,\
         NUM_OF_FLOORS, RENOVATION = range(10)
 
 
 def predict_price(values):
-  # закодируем ремонт
-  if values[0][8] == 'Cosmetic':
-    values[0] += [0, 0, 0]
-  elif values[0][8] == 'Designer':
-    values[0] += [1, 0, 0]
-  elif values[0][8] == 'European-style renovation':
-    values[0] += [0, 1, 0]
-  else:
-    values[0] += [0, 0, 1]
-  # удалим старое значение ремонта
-  values[0].pop(8)
-
-  # поделим на регион и москву
-  # проверка на регион
-  if values[0][2] == 0:
-     # удаляем район и индикатор москвы, тк они дальше не нужны
-    values[0].pop(8)
-    values[0].pop(2)
-    # загрузим модель для предсказания
-    load_model = pickle.load(open('lightgbm_region', 'rb'))
-
-  else:
-    # удалим индикатор москвы, тк он дальше не нужен
-    values[0].pop(2)
-    # проверка на moscow_high
-    if values[0][7] in ['zao', 'cao']:
-      # кодируем район
-      if values[0][7] == 'zao':
-        values[0] += [1]
-      else:
-        values[0] += [0]
-      # удалим старое значение района
-      values[0].pop(7)
-      # загрузим модель для предсказания
-      load_model = pickle.load(open('lightgbm_high', 'rb'))
-
-    # проверка на moscow_medium
-    elif values[0][7] in ['sao', 'szao', 'uao', 'uzao']:
-      # кодируем район
-      if values[0][7] == 'sao':
+    if values[0][8] == 'Cosmetic':
         values[0] += [0, 0, 0]
-      elif values[0][7] == 'szao':
+    elif values[0][8] == 'Designer':
         values[0] += [1, 0, 0]
-      elif values[0][7] == ' uao':
+    elif values[0][8] == 'European-style renovation':
         values[0] += [0, 1, 0]
-      else:
-        values[0] += [0, 0, 1]
-      # удалим старое значение района
-      values[0].pop(7)
-      # загрузим модель для предсказания
-      load_model = pickle.load(open('lightgbm_medium', 'rb'))
-
-    # проверка на moscow_low
     else:
-      # кодируем район
-      if values[0][7] == 'nmao':
-        values[0] += [0, 0, 0]
-      elif values[0][7] == 'uvao':
-        values[0] += [0, 1, 0]
-      elif values[0][7] == 'vao':
         values[0] += [0, 0, 1]
-      else:
-        values[0] += [1, 0, 0]
-      # удалим старое значение района
-      values[0].pop(7)
-      # загрузим модель для предсказания
-      load_model = pickle.load(open('lightgbm_low', 'rb'))
+    values[0].pop(8)
 
-  # делаем предсказание
-  y_pred = load_model.predict(values)
-  return y_pred[0]
+    if values[0][2] == 0:
+        values[0].pop(8)
+        values[0].pop(2)
+        load_model = pickle.load(open('lightbm_region', 'rb'))
+
+    else:
+        values[0].pop(2)
+        if values[0][7] in ['zao', 'cao']:
+            if values[0][7] == 'zao':
+                values[0] += [1]
+            else:
+                values[0] += [0]
+            values[0].pop(7)
+            load_model = pickle.load(open('lightgbm_high', 'rb'))
+
+        elif values[0][7] in ['sao', 'szao', 'uao', 'uzao']:
+            if values[0][7] == 'sao':
+                values[0] += [0, 0, 0]
+            elif values[0][7] == 'szao':
+                values[0] += [1, 0, 0]
+            elif values[0][7] == 'uao':
+                values[0] += [0, 1, 0]
+            else:
+                values[0] += [0, 0, 1]
+            values[0].pop(7)
+            load_model = pickle.load(open('lightgbm_medium', 'rb'))
+
+        else:
+            if values[0][7] == 'nmao':
+                values[0] += [0, 0, 0]
+            elif values[0][7] == 'uvao':
+                values[0] += [0, 1, 0]
+            elif values[0][7] == 'vao':
+                values[0] += [0, 0, 1]
+            else:
+                values[0] += [1, 0, 0]
+            values[0].pop(7)
+            load_model = pickle.load(open('lightgbm_low', 'rb'))
+
+    y_pred = load_model.predict(values)
+    return y_pred[0]
 
 
 async def start(update, context):
@@ -113,6 +103,8 @@ async def start(update, context):
 
 async def is_new(update, context):
     ans = update.message.text
+    user = update.message.from_user
+    logging.info('Квартира пользователя %s: %s', user, ans)
     DATA['is_new'] = 1 if ans == 'Новая' else 0
     await update.message.reply_text(
         "Сколько времени в минутах занимает путь пешком до ближайшей станции метро?",
@@ -125,6 +117,8 @@ async def is_new(update, context):
 async def minutes(update, context):
     DATA['minutes'] = float(update.message.text)
     reply_keyboard = [["В Подмосковье", "В Москве"]]
+    user = update.message.from_user
+    logging.info('Минут до метро у пользователя %s: %s', user, update.message.text)
     await update.message.reply_text("Ваша квартира находится в Москве или в Подмосковье?",
             reply_markup=ReplyKeyboardMarkup(
                 reply_keyboard, one_time_keyboard=True
@@ -135,6 +129,8 @@ async def minutes(update, context):
 
 async def is_moscow(update, context):
     ans = update.message.text
+    user = update.message.from_user
+    logging.info('Квартира пользователя %s: %s', user, ans)
     if ans == 'В Москве':
         DATA['is_moscow'] = 1
         reply_keyboard = [["uvao", "uao", "cao", "zao", "sao", "szao", "uzao", "svao", "vao", "nmao"]]
@@ -156,6 +152,8 @@ async def is_moscow(update, context):
 
 async def district(update, context):
     DATA['district'] = update.message.text
+    user = update.message.from_user
+    logging.info('Район пользователя %s: %s', user, update.message.text)
     await update.message.reply_text(
         "Сколько комнат в Вашей квартире?",
         reply_markup=ReplyKeyboardRemove(),
@@ -165,6 +163,8 @@ async def district(update, context):
 
 async def rooms(update, context):
     ans = update.message.text
+    user = update.message.from_user
+    logging.info('Комнат в квартире пользователя %s: %s', user, ans)
     DATA['rooms'] = float(ans)
     await update.message.reply_text(
         "Какова общая площадь Вашей квартиры в квадратных метрах?",
@@ -175,6 +175,8 @@ async def rooms(update, context):
 
 async def area(update, context):
     ans = update.message.text
+    user = update.message.from_user
+    logging.info('Площадь квартиры пользователя %s: %s', user, ans)
     DATA['area'] = float(ans)
     await update.message.reply_text(
         "Какова площадь кухни в Вашей квартире в квадратных метрах?"
@@ -184,6 +186,8 @@ async def area(update, context):
 
 async def kit_area(update, context):
     ans = update.message.text
+    user = update.message.from_user
+    logging.info('Площадь кухни пользователя %s: %s', user, ans)
     DATA['kit_area'] = float(ans)
     await update.message.reply_text(
         "На каком этаже расположена Ваша квартира?"
@@ -193,6 +197,8 @@ async def kit_area(update, context):
 
 async def floor(update, context):
     ans = update.message.text
+    user = update.message.from_user
+    logging.info('Этаж пользователя %s: %s', user, ans)
     DATA['floor'] = float(ans)
     await update.message.reply_text(
         "Сколько всего этажей в Вашем доме?"
@@ -202,6 +208,8 @@ async def floor(update, context):
 
 async def num_of_floors(update, context):
     ans = update.message.text
+    user = update.message.from_user
+    logging.info('Кол-во этажей пользователя %s: %s', user, ans)
     DATA['num_of_floors'] = int(ans)
     reply_keyboard = [["Cosmetic", "European-style renovation", "Designer", "Without renovation"]]
     await update.message.reply_text(
@@ -215,6 +223,8 @@ async def num_of_floors(update, context):
 
 async def renovation(update, context):
     ans = update.message.text
+    user = update.message.from_user
+    logging.info('Ремонт у пользователя %s: %s', user, ans)
     DATA['renovation'] = ans
     features = [[
         DATA['is_new'],
@@ -231,11 +241,14 @@ async def renovation(update, context):
     price = round(predict_price(features))
     # await update.message.reply_text(f"{features}")
     await update.message.reply_text(f"Ваша квартира оценивается в {price:,} рублей")
+    logging.info('Стоимость квартиры пользователя %s: %s', user, price)
     return ConversationHandler.END
 
 
 async def cancel(update, context):
+    user = update.message.from_user
     await update.message.reply_text("Увидимся в другой раз!")
+    logging.info('Пользователь %s отменил диалог', user)
     return ConversationHandler.END
 
 
