@@ -1,8 +1,12 @@
 #! .venv/bin/python3
 import pickle
-import lightgbm
+import pandas as pd
+import numpy as np
 import logging
+from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler
 from lightgbm import LGBMRegressor
+from xgboost import XGBRegressor
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
     Application,
@@ -14,6 +18,7 @@ from telegram.ext import (
     filters,
 )
 
+OBJECTS_PATH = 'pickles/'
 with open("token.txt", "r") as token_file:
     TOKEN = token_file.readline()[:-1]
 
@@ -26,68 +31,133 @@ logging.basicConfig(
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.info('Начало работы бота')
 
-DATA = {}
-IS_NEW, MINUTES, IS_MOSCOW, DISTRICT, ROOMS, AREA, KIT_AREA, FLOOR,\
-        NUM_OF_FLOORS, RENOVATION = range(10)
+DATA = pd.DataFrame()
+IS_NEW, MINUTES, METRO, DISTRICT, ROOMS, AREA, LIVING_AREA, KIT_AREA, FLOOR,\
+        NUM_OF_FLOORS, WALL_MATERIAL, RENOVATION = range(12)
 
 
-def predict_price(values):
-    if values[0][8] == 'Cosmetic':
-        values[0] += [0, 0, 0]
-    elif values[0][8] == 'Designer':
-        values[0] += [1, 0, 0]
-    elif values[0][8] == 'European-style renovation':
-        values[0] += [0, 1, 0]
+def make_dummy(df, column, cols):
+    df = pd.get_dummies(df, columns=[column], dtype=int)
+    for col in cols:
+        if col not in df.columns:
+            df[col] = [0]
+    return df
+
+
+def count_price_level(district):
+    match district:
+        case 'ЦАО' | 'ЗАО' | 'ЮЗАО' | 'САО' | 'СЗАО':
+            price_level = 'high'
+        case 'ЮАО' | 'СВАО' | 'ВАО':
+            price_level = 'medium'
+        case 'ЮВАО' | 'Новая Москва':
+            price_level = 'low'
+    return price_level
+
+
+def load_objects(price_level):
+    match price_level:
+        case 'high':
+            encoder_fname = OBJECTS_PATH + 'label_encoder_high.dat'
+            scaler_fname = OBJECTS_PATH + 'scaler_high.dat'
+            model_fname = OBJECTS_PATH + 'model_high.dat'
+        case 'medium':
+            encoder_fname = OBJECTS_PATH + 'label_encoder_medium.dat'
+            scaler_fname = OBJECTS_PATH + 'scaler_medium.dat'
+            model_fname = OBJECTS_PATH + 'model_mid.dat'
+        case 'low':
+            encoder_fname = OBJECTS_PATH + 'label_encoder_low.dat'
+            scaler_fname = OBJECTS_PATH + 'scaler_low.dat'
+            model_fname = OBJECTS_PATH + 'model_low.dat'
+    with open(encoder_fname, 'rb') as encoder_f:
+        encoder = pickle.load(encoder_f)
+    with open(scaler_fname, 'rb') as scaler_f:
+        scaler = pickle.load(scaler_f)
+    with open(model_fname, 'rb') as model_f:
+        model = pickle.load(model_f)
+    return encoder, scaler, model
+
+
+def drop_extra_cols(df, price_level):
+    if price_level == 'high':
+        df = df[['Минут до метро', 'Количество комнат',
+                'Площадь', 'Жилая площадь', 'Кухня площадь',
+                'Этаж', 'Количество этажей',
+                'Станция метро (очищенная)', 'Тип_квартиры_код',
+                'Материал стен_Блочный', 'Материал стен_Иные',
+                'Материал стен_Кирпичный', 'Материал стен_Монолитно-кирпичный',
+                'Материал стен_Монолитный', 'Материал стен_Панельный',
+                'Ремонт_Без ремонта', 'Ремонт_Дизайнерский',
+                'Ремонт_Евроремонт', 'Ремонт_Косметический', 'Ремонт_Неизвестно',
+                'Округ_ЗАО', 'Округ_САО', 'Округ_СЗАО', 'Округ_ЦАО', 'Округ_ЮЗАО']]
+    elif price_level == 'medium':
+        df = df[['Минут до метро', 'Количество комнат',
+                'Площадь', 'Жилая площадь', 'Кухня площадь',
+                'Этаж', 'Количество этажей',
+                'Станция метро (очищенная)', 'Тип_квартиры_код',
+                'Материал стен_Блочный', 'Материал стен_Иные',
+                'Материал стен_Кирпичный', 'Материал стен_Монолитно-кирпичный',
+                'Материал стен_Монолитный', 'Материал стен_Панельный',
+                'Ремонт_Без ремонта', 'Ремонт_Дизайнерский',
+                'Ремонт_Евроремонт', 'Ремонт_Косметический', 'Ремонт_Неизвестно',
+                'Округ_ВАО', 'Округ_СВАО', 'Округ_ЮАО']]
     else:
-        values[0] += [0, 0, 1]
-    values[0].pop(8)
+        df = df[['Минут до метро', 'Количество комнат',
+                'Площадь', 'Жилая площадь', 'Кухня площадь',
+                'Этаж', 'Количество этажей',
+                'Станция метро (очищенная)', 'Тип_квартиры_код',
+                'Материал стен_Блочный', 'Материал стен_Иные',
+                'Материал стен_Кирпичный', 'Материал стен_Монолитно-кирпичный',
+                'Материал стен_Монолитный', 'Материал стен_Панельный',
+                'Ремонт_Без ремонта', 'Ремонт_Дизайнерский',
+                'Ремонт_Евроремонт', 'Ремонт_Косметический', 'Ремонт_Неизвестно',
+                'Округ_Новая Москва', 'Округ_ЮВАО']]
+    return df
 
-    if values[0][2] == 0:
-        values[0].pop(8)
-        values[0].pop(2)
-        load_model = pickle.load(open('lightbm_region', 'rb'))
 
-    else:
-        values[0].pop(2)
-        if values[0][7] in ['zao', 'cao']:
-            if values[0][7] == 'zao':
-                values[0] += [1]
-            else:
-                values[0] += [0]
-            values[0].pop(7)
-            load_model = pickle.load(open('lightgbm_high', 'rb'))
+def label_encode(df, col, encoder, price_level):
+    try:
+        df[col] = encoder.transform(df[col])
+    except ValueError:
+        encoder.classes_ = np.append(encoder.classes_, df[col])
+        f = open(f'{OBJECTS_PATH}label_encoder_{price_level}.dat', 'wb')
+        pickle.dump(encoder, f)
+        f.close()
+        df[col] = encoder.transform(df[col])
+    return df
 
-        elif values[0][7] in ['sao', 'szao', 'uao', 'uzao']:
-            if values[0][7] == 'sao':
-                values[0] += [0, 0, 0]
-            elif values[0][7] == 'szao':
-                values[0] += [1, 0, 0]
-            elif values[0][7] == 'uao':
-                values[0] += [0, 1, 0]
-            else:
-                values[0] += [0, 0, 1]
-            values[0].pop(7)
-            load_model = pickle.load(open('lightgbm_medium', 'rb'))
 
-        else:
-            if values[0][7] == 'nmao':
-                values[0] += [0, 0, 0]
-            elif values[0][7] == 'uvao':
-                values[0] += [0, 1, 0]
-            elif values[0][7] == 'vao':
-                values[0] += [0, 0, 1]
-            else:
-                values[0] += [1, 0, 0]
-            values[0].pop(7)
-            load_model = pickle.load(open('lightgbm_low', 'rb'))
-
-    y_pred = load_model.predict(values)
-    return y_pred[0]
+def predict_price(df):
+    price_level = count_price_level(df.loc[0, "Округ"])
+    df = make_dummy(df, column='Материал стен', cols=[
+        'Материал стен_Блочный', 'Материал стен_Иные',
+        'Материал стен_Кирпичный',
+        'Материал стен_Монолитно-кирпичный',
+        'Материал стен_Монолитный',
+        'Материал стен_Панельный'
+    ])
+    df = make_dummy(df, column='Ремонт', cols=[
+        'Ремонт_Без ремонта', 'Ремонт_Дизайнерский',
+        'Ремонт_Евроремонт', 'Ремонт_Косметический',
+        'Ремонт_Неизвестно'
+    ])
+    df = make_dummy(df, column='Округ', cols=[
+        'Округ_ВАО', 'Округ_ЗАО', 'Округ_Новая Москва',
+        'Округ_САО', 'Округ_СВАО', 'Округ_СЗАО',
+        'Округ_ЦАО', 'Округ_ЮАО', 'Округ_ЮВАО', 'Округ_ЮЗАО'
+    ])
+    df = drop_extra_cols(df, price_level)
+    encoder, scaler, model = load_objects(price_level)
+    df = label_encode(df, 'Станция метро (очищенная)', encoder, price_level)
+    df[df.columns] = scaler.transform(df[df.columns])
+    df = df.reindex(sorted(df.columns), axis=1)
+    y = model.predict(df)
+    return y[0]
 
 
 async def start(update, context):
-    reply_keyboard = [["Новая", "Не Новая"]]
-    DATA = {}
+    reply_keyboard = [["Новостройка", "Вторичное"]]
+    DATA = pd.DataFrame()
     await update.message.reply_text(
             "Здравствуйте! Для оценки квартиры, я бы"
             "хотел задать вам несколько вопросов."
@@ -105,7 +175,7 @@ async def is_new(update, context):
     ans = update.message.text
     user = update.message.from_user
     logging.info('Квартира пользователя %s: %s', user, ans)
-    DATA['is_new'] = 1 if ans == 'Новая' else 0
+    DATA['Тип_квартиры_код'] = [1 if ans == 'Новостройка' else 0]
     await update.message.reply_text(
         "Сколько времени в минутах занимает путь пешком до ближайшей станции метро?",
         reply_markup=ReplyKeyboardRemove(),
@@ -115,43 +185,32 @@ async def is_new(update, context):
 
 
 async def minutes(update, context):
-    DATA['minutes'] = float(update.message.text)
-    reply_keyboard = [["В Подмосковье", "В Москве"]]
+    DATA['Минут до метро'] = [float(update.message.text)]
     user = update.message.from_user
     logging.info('Минут до метро у пользователя %s: %s', user, update.message.text)
-    await update.message.reply_text("Ваша квартира находится в Москве или в Подмосковье?",
+    await update.message.reply_text(
+        "Введите название ближайшей станции метро:",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return METRO
+
+
+async def metro(update, context):
+    ans = update.message.text
+    user = update.message.from_user
+    logging.info('Ближайшая станция метро пользователя %s: %s', user, ans)
+    DATA['Станция метро (очищенная)'] = [update.message.text]
+    reply_keyboard = [["ЮВАО", "ЮАО", "ЦАО", "ЗАО", "САО", "СЗАО", "ЮЗАО", "СВАО", "ВАО", "Новая Москва"]]
+    await update.message.reply_text("В каком районе Москвы находится Ваша квартира?",
             reply_markup=ReplyKeyboardMarkup(
                 reply_keyboard, one_time_keyboard=True
             )
     )
-    return IS_MOSCOW
-
-
-async def is_moscow(update, context):
-    ans = update.message.text
-    user = update.message.from_user
-    logging.info('Квартира пользователя %s: %s', user, ans)
-    if ans == 'В Москве':
-        DATA['is_moscow'] = 1
-        reply_keyboard = [["uvao", "uao", "cao", "zao", "sao", "szao", "uzao", "svao", "vao", "nmao"]]
-        await update.message.reply_text("В каком районе Москвы находится Ваша квартира?",
-                reply_markup=ReplyKeyboardMarkup(
-                    reply_keyboard, one_time_keyboard=True
-                )
-        )
-        return DISTRICT
-    else:
-        DATA['is_moscow'] = 0
-        DATA['district'] = ''
-        await update.message.reply_text(
-            "Сколько комнат в Вашей квартире?",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return ROOMS
+    return DISTRICT
 
 
 async def district(update, context):
-    DATA['district'] = update.message.text
+    DATA['Округ'] = [update.message.text]
     user = update.message.from_user
     logging.info('Район пользователя %s: %s', user, update.message.text)
     await update.message.reply_text(
@@ -165,7 +224,7 @@ async def rooms(update, context):
     ans = update.message.text
     user = update.message.from_user
     logging.info('Комнат в квартире пользователя %s: %s', user, ans)
-    DATA['rooms'] = float(ans)
+    DATA['Количество комнат'] = [float(ans)]
     await update.message.reply_text(
         "Какова общая площадь Вашей квартиры в квадратных метрах?",
         reply_markup=ReplyKeyboardRemove(),
@@ -177,7 +236,18 @@ async def area(update, context):
     ans = update.message.text
     user = update.message.from_user
     logging.info('Площадь квартиры пользователя %s: %s', user, ans)
-    DATA['area'] = float(ans)
+    DATA['Площадь'] = [float(ans)]
+    await update.message.reply_text(
+        "Какова жилая площадь Вашей квартиры в квадратных метрах?"
+    )
+    return LIVING_AREA
+
+
+async def living_area(update, context):
+    ans = update.message.text
+    user = update.message.from_user
+    logging.info('Жилая площадь квартиры пользователя %s: %s', user, ans)
+    DATA['Жилая площадь'] = [float(ans)]
     await update.message.reply_text(
         "Какова площадь кухни в Вашей квартире в квадратных метрах?"
     )
@@ -188,7 +258,7 @@ async def kit_area(update, context):
     ans = update.message.text
     user = update.message.from_user
     logging.info('Площадь кухни пользователя %s: %s', user, ans)
-    DATA['kit_area'] = float(ans)
+    DATA['Кухня площадь'] = [float(ans)]
     await update.message.reply_text(
         "На каком этаже расположена Ваша квартира?"
     )
@@ -199,7 +269,7 @@ async def floor(update, context):
     ans = update.message.text
     user = update.message.from_user
     logging.info('Этаж пользователя %s: %s', user, ans)
-    DATA['floor'] = float(ans)
+    DATA['Этаж'] = [float(ans)]
     await update.message.reply_text(
         "Сколько всего этажей в Вашем доме?"
     )
@@ -210,8 +280,23 @@ async def num_of_floors(update, context):
     ans = update.message.text
     user = update.message.from_user
     logging.info('Кол-во этажей пользователя %s: %s', user, ans)
-    DATA['num_of_floors'] = int(ans)
-    reply_keyboard = [["Cosmetic", "European-style renovation", "Designer", "Without renovation"]]
+    DATA['Количество этажей'] = [float(ans)]
+    reply_keyboard = [["Иные", "Кирпичный", "Монолитно-кирпичный", "Монолитный", "Панельный"]]
+    await update.message.reply_text(
+        "Какой материал стен в Вашей квартире?",
+        reply_markup=ReplyKeyboardMarkup(
+            reply_keyboard, one_time_keyboard=True
+        )
+    )
+    return WALL_MATERIAL
+
+
+async def wall_material(update, context):
+    ans = update.message.text
+    user = update.message.from_user
+    logging.info('Материал стен в квартире пользователя %s: %s', user, ans)
+    DATA['Материал стен'] = [ans]
+    reply_keyboard = [["Без ремонта", "Дизайнерский", "Евроремонт", "Косметический", "Неизвестно"]]
     await update.message.reply_text(
         "Какой ремонт в Вашей квартире?",
         reply_markup=ReplyKeyboardMarkup(
@@ -225,21 +310,8 @@ async def renovation(update, context):
     ans = update.message.text
     user = update.message.from_user
     logging.info('Ремонт у пользователя %s: %s', user, ans)
-    DATA['renovation'] = ans
-    features = [[
-        DATA['is_new'],
-        DATA['minutes'],
-        DATA['is_moscow'],
-        DATA['rooms'],
-        DATA['area'],
-        DATA['kit_area'],
-        DATA['floor'],
-        DATA['num_of_floors'],
-        DATA['renovation'],
-        DATA['district']
-    ]]
-    price = round(predict_price(features))
-    # await update.message.reply_text(f"{features}")
+    DATA['Ремонт'] = [ans]
+    price = round(predict_price(DATA))
     await update.message.reply_text(f"Ваша квартира оценивается в {price:,} рублей")
     logging.info('Стоимость квартиры пользователя %s: %s', user, price)
     return ConversationHandler.END
@@ -259,16 +331,18 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            IS_NEW: [MessageHandler(filters.Regex("^(Новая|Не Новая)$"), is_new)],
+            IS_NEW: [MessageHandler(filters.Regex("^(Новостройка|Вторичное)$"), is_new)],
             MINUTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, minutes)],
-            IS_MOSCOW: [MessageHandler(filters.Regex("^(В Подмосковье|В Москве)$"), is_moscow)],
-            DISTRICT: [MessageHandler(filters.Regex("^(uvao|uao|cao|zao|sao|szao|uzao|svao|vao|nmao)$"), district)],
+            METRO: [MessageHandler(filters.TEXT & ~filters.COMMAND, metro)],
+            DISTRICT: [MessageHandler(filters.Regex("^(ЮВАО|ЮАО|ЦАО|ЗАО|САО|СЗАО|ЮЗАО|СВАО|ВАО|Новая Москва)$"), district)],
             ROOMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, rooms)],
             AREA: [MessageHandler(filters.TEXT & ~filters.COMMAND, area)],
+            LIVING_AREA: [MessageHandler(filters.TEXT & ~filters.COMMAND, living_area)],
             KIT_AREA: [MessageHandler(filters.TEXT & ~filters.COMMAND, kit_area)],
             FLOOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, floor)],
             NUM_OF_FLOORS: [MessageHandler(filters.TEXT & ~filters.COMMAND, num_of_floors)],
-            RENOVATION: [MessageHandler(filters.Regex("^(Cosmetic|European-style renovation|Designer|Without renovation)$"), renovation)],
+            WALL_MATERIAL: [MessageHandler(filters.Regex("^(Иные|Кирпичный|Монолитно-кирпичный|Монолитный|Панельный)$"), wall_material)],
+            RENOVATION: [MessageHandler(filters.Regex("^(Без ремонта|Дизайнерский|Евроремонт|Косметический|Неизвестно)$"), renovation)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
